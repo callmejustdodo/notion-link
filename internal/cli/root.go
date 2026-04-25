@@ -18,6 +18,11 @@ func NewRootCmd() *cobra.Command {
 	}
 
 	root.AddCommand(newLinkCmd())
+	root.AddCommand(newSyncCmd())
+	root.AddCommand(newUnlinkCmd())
+	root.AddCommand(newSearchCmd())
+	root.AddCommand(newListCmd())
+	root.AddCommand(newSpacesCmd())
 	root.AddCommand(newVersionCmd())
 	return root
 }

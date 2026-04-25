@@ -14,6 +14,17 @@ import (
 	"github.com/callmejustdodo/notion-link/internal/model"
 )
 
+// PageRef carries the resolution of a page-id mention.
+//
+// When Internal is true, Link is a Markdown-relative path (relative to
+// the *cache* file currently being rendered) that an editor can follow.
+// When Internal is false, Link is a notion:// deep-link to the Notion app.
+type PageRef struct {
+	Title    string
+	Link     string
+	Internal bool
+}
+
 // Options controls renderer behavior.
 type Options struct {
 	// SpaceName is the workspace display name; emitted in frontmatter.
@@ -22,9 +33,14 @@ type Options struct {
 	LastEdited time.Time
 	// SourceURL is the canonical Notion URL for this page (optional).
 	SourceURL string
-	// LookupPageTitle resolves a page-id mention to a title.
-	// Return "" if unknown — the renderer will fall back to "(page)".
+	// LookupPageTitle resolves a page-id mention to a title only.
+	// Used as a fallback when ResolvePageRef is nil. Return "" if unknown.
 	LookupPageTitle func(id string) string
+	// ResolvePageRef resolves a page-id mention to a (title, link, internal)
+	// triple. Set this when exporting multiple pages so cross-page links can
+	// be relative paths between co-exported files. When nil, the renderer
+	// falls back to LookupPageTitle and emits a notion:// deep-link.
+	ResolvePageRef func(id string) PageRef
 	// ExportedAt stamps the frontmatter; defaults to time.Now() if zero.
 	ExportedAt time.Time
 	// Tool name shown in frontmatter (e.g. "notion-link 0.1.0").
@@ -267,8 +283,47 @@ func (r *renderer) subPageLink(b *strings.Builder, blk *model.Block, indent stri
 	if title == "" {
 		title = "(untitled page)"
 	}
+	ref := r.resolvePageRef(blk.ID)
+	if ref.Title != "" {
+		title = ref.Title
+	}
+	link := ref.Link
+	if link == "" {
+		link = "notion://www.notion.so/" + strings.ReplaceAll(blk.ID, "-", "")
+	}
 	b.WriteString(indent)
-	fmt.Fprintf(b, "- [%s](notion://www.notion.so/%s)\n", title, strings.ReplaceAll(blk.ID, "-", ""))
+	fmt.Fprintf(b, "- [%s](%s)\n", title, link)
+}
+
+// formatPageMention turns a page-id mention into a Markdown link, preferring
+// an internal cross-link when the page is co-exported.
+func (r *renderer) formatPageMention(id string) string {
+	ref := r.resolvePageRef(id)
+	title := ref.Title
+	if title == "" {
+		title = "(page)"
+	}
+	link := ref.Link
+	if link == "" {
+		link = "notion://www.notion.so/" + strings.ReplaceAll(id, "-", "")
+	}
+	return fmt.Sprintf("[%s](%s)", title, link)
+}
+
+// resolvePageRef centralizes the precedence between ResolvePageRef and the
+// title-only fallback.
+func (r *renderer) resolvePageRef(id string) PageRef {
+	if r.opt.ResolvePageRef != nil {
+		ref := r.opt.ResolvePageRef(id)
+		if ref.Title == "" && r.opt.LookupPageTitle != nil {
+			ref.Title = r.opt.LookupPageTitle(id)
+		}
+		return ref
+	}
+	if r.opt.LookupPageTitle != nil {
+		return PageRef{Title: r.opt.LookupPageTitle(id)}
+	}
+	return PageRef{}
 }
 
 func (r *renderer) renderChildren(b *strings.Builder, blk *model.Block, indent string) {
@@ -349,14 +404,7 @@ func (r *renderer) applyAnnotations(text string, anns [][]any) string {
 		if len(a) >= 2 {
 			if k, _ := a[0].(string); k == "p" {
 				if id, _ := a[1].(string); id != "" {
-					title := ""
-					if r.opt.LookupPageTitle != nil {
-						title = r.opt.LookupPageTitle(id)
-					}
-					if title == "" {
-						title = "(page)"
-					}
-					return fmt.Sprintf("[%s](notion://www.notion.so/%s)", title, strings.ReplaceAll(id, "-", ""))
+					return r.formatPageMention(id)
 				}
 			}
 		}
