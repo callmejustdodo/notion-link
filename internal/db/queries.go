@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/callmejustdodo/notion-link/internal/model"
 )
@@ -54,7 +55,7 @@ LIMIT 1`
 	if properties.Valid && properties.String != "" {
 		var props map[string]any
 		if err := json.Unmarshal([]byte(properties.String), &props); err == nil {
-			p.Title = extractTitle(props)
+			p.Title = ExtractPlainTitle(props)
 		}
 	}
 	if content.Valid && content.String != "" {
@@ -66,10 +67,77 @@ LIMIT 1`
 	return &p, nil
 }
 
-// extractTitle pulls the title text out of a Notion properties JSON map.
-// `properties.title` is a `[[ "text", [["b"], ...] ]]` rich-text array;
-// for MVP we just concatenate the leading string of each segment.
-func extractTitle(props map[string]any) string {
+// LoadTree loads a block (page or any other type) along with its descendants
+// up to maxDepth. Pass 0 for unlimited depth.
+//
+// Pages are not recursed into when followPages is false — they appear as
+// childless blocks the renderer can turn into a sub-page link. This is
+// the M1 default; recursive sub-page export lands in M2.
+func (c *Conn) LoadTree(ctx context.Context, rootID string, maxDepth int, followPages bool) (*model.Block, error) {
+	return c.loadBlockRec(ctx, rootID, 0, maxDepth, followPages)
+}
+
+func (c *Conn) loadBlockRec(ctx context.Context, id string, depth, maxDepth int, followPages bool) (*model.Block, error) {
+	blk, childIDs, err := c.getBlockRow(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	stop := !followPages && depth > 0 && blk.Type == "page"
+	if stop || (maxDepth > 0 && depth >= maxDepth) {
+		return blk, nil
+	}
+	for _, cid := range childIDs {
+		child, err := c.loadBlockRec(ctx, cid, depth+1, maxDepth, followPages)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue // missing offline child, skip silently
+			}
+			return nil, fmt.Errorf("load child %s: %w", cid, err)
+		}
+		blk.Children = append(blk.Children, child)
+	}
+	return blk, nil
+}
+
+func (c *Conn) getBlockRow(ctx context.Context, id string) (*model.Block, []string, error) {
+	const q = `
+SELECT type, properties, format, content
+FROM block
+WHERE id = ? AND alive = 1
+LIMIT 1`
+
+	var (
+		blk        = &model.Block{ID: id}
+		typ        string
+		properties sql.NullString
+		format     sql.NullString
+		content    sql.NullString
+	)
+	err := c.sql.QueryRowContext(ctx, q, id).Scan(&typ, &properties, &format, &content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	blk.Type = typ
+	if properties.Valid && properties.String != "" {
+		_ = json.Unmarshal([]byte(properties.String), &blk.Properties)
+	}
+	if format.Valid && format.String != "" {
+		_ = json.Unmarshal([]byte(format.String), &blk.Format)
+	}
+	var childIDs []string
+	if content.Valid && content.String != "" {
+		_ = json.Unmarshal([]byte(content.String), &childIDs)
+	}
+	return blk, childIDs, nil
+}
+
+// ExtractPlainTitle returns the concatenated plain text from a Notion
+// rich-text `title` array (`[[ "text", [...annotations] ], ["more"]]`).
+// Annotations are ignored.
+func ExtractPlainTitle(props map[string]any) string {
 	raw, ok := props["title"]
 	if !ok {
 		return ""
@@ -89,4 +157,32 @@ func extractTitle(props map[string]any) string {
 		}
 	}
 	return string(out)
+}
+
+// LookupTitle returns the plain title for the given block id, or "" if not
+// found. Used by the renderer to resolve page-mention links.
+func (c *Conn) LookupTitle(ctx context.Context, id string) string {
+	const q = `SELECT properties FROM block WHERE id = ? AND alive = 1 LIMIT 1`
+	var props sql.NullString
+	if err := c.sql.QueryRowContext(ctx, q, id).Scan(&props); err != nil {
+		return ""
+	}
+	if !props.Valid || props.String == "" {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(props.String), &m); err != nil {
+		return ""
+	}
+	return ExtractPlainTitle(m)
+}
+
+// SpaceName returns the workspace name for a given space id, or "" on miss.
+func (c *Conn) SpaceName(ctx context.Context, spaceID string) string {
+	const q = `SELECT name FROM space WHERE id = ? LIMIT 1`
+	var name sql.NullString
+	if err := c.sql.QueryRowContext(ctx, q, spaceID).Scan(&name); err != nil {
+		return ""
+	}
+	return name.String
 }

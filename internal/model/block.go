@@ -4,7 +4,7 @@ package model
 
 // Page is the slim view of a Notion page-typed block we use for resolving
 // titles, parents, and child links. Body content is loaded separately as
-// a tree of Block values.
+// a tree of Block values rooted at this page.
 type Page struct {
 	ID                   string
 	SpaceID              string
@@ -18,10 +18,14 @@ type Page struct {
 }
 
 // Block is the rendering-time view of a single Notion block.
-// Populated incrementally as render support for each type lands.
+//
+// Properties and Format are kept as decoded maps so the renderer can pull
+// type-specific fields (`title`, `checked`, `language`, ...) without us
+// pre-modeling every Notion block schema.
 type Block struct {
-	ID       string
-	Type     string
-	Title    string   // flattened plain text from properties.title
-	Children []*Block // resolved child blocks
+	ID         string
+	Type       string
+	Properties map[string]any
+	Format     map[string]any
+	Children   []*Block
 }

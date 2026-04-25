@@ -36,3 +36,8 @@ go.work.sum
 
 # Built binary
 /notion-link
+
+# Dev test artifacts: real Notion content rendered while developing the tool.
+# These are NOT example/sample data — keep them out of git.
+/.notion/
+/notes/
